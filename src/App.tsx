@@ -29,9 +29,9 @@ export default function App() {
  },[]);
  useEffect(()=>{const onKey=(e:KeyboardEvent)=>{if(e.key==='Escape')setSelected(null);};document.addEventListener('keydown',onKey);return ()=>document.removeEventListener('keydown',onKey);},[]);
  useEffect(()=>{void refresh();const timer=setInterval(()=>void refresh(),1500);return ()=>clearInterval(timer);},[]);
- useEffect(()=>{localStorage.setItem('favorites',JSON.stringify(favorites));},[favorites]);
+ useEffect(()=>{try{localStorage.setItem('favorites',JSON.stringify(favorites));}catch{/* Remain usable when local persistence is unavailable. */}},[favorites]);
  const act=async(fn:()=>Promise<unknown>)=>{setError('');setBusy(true);try{await fn();await refresh();}catch(e){setError(String(e));}finally{setBusy(false);}};
- const choose=(tool:Tool)=>{setSelected(tool);setFiles([]);setDestination('');setFormat(tool.output);setPages('1');setError('');setQuality(23);setTrack(0);};
+ const choose=(tool:Tool)=>{setSelected(tool);setFiles([]);setDestination('');setFormat(tool.output);setPages('1');setError('');setQuality(23);setTrack(0);setWidth(1920);};
  const toggle=(id:string)=>setFavorites(f=>f.includes(id)?f.filter(v=>v!==id):[...f,id]);
  const visible=selectTools(category,query,favorites);
  const engine=engines.find(e=>e.id===selected?.engine);
@@ -49,5 +49,5 @@ export default function App() {
  {selected.id==='video.convert'&&<label>Qualité CRF (plus bas = meilleure qualité)<input type="number" min="18" max="30" value={quality} onChange={e=>setQuality(Number(e.target.value))}/></label>}
  {selected.id==='video.audio'&&<label>Numéro de piste audio (0 = première)<input type="number" min="0" value={track} onChange={e=>setTrack(Number(e.target.value))}/></label>}
  <label>Dossier de destination<button onClick={()=>void act(async()=>{const d=await bridge.pickDirectory();if(d)setDestination(d);})}>Choisir un dossier</button><small className="path">{destination||'Aucun dossier sélectionné'}</small></label>
- {!engine?.installed&&<p className="engine-note">Le moteur {selected.engine} doit être installé. Sa distribution est en cours de qualification ; aucun téléchargement non vérifié n’est proposé.</p>}{error&&<p className="error" role="alert">{error}</p>}<button className="primary" disabled={busy||!files.length||!destination||!engine?.installed} onClick={()=>void act(async()=>{await bridge.enqueue({operation:selected.id,inputs:files,destination,format,pages,width,quality,track});setSelected(null);setView('history');})}>Ajouter à la file　→</button><small className="source-note">Vos originaux restent intacts. Aucun fichier n’est écrasé.</small></section></div>}</div>;
+ {!engine?.installed&&<p className="engine-note">Le moteur {selected.engine} doit être installé. Sa distribution est en cours de qualification ; aucun téléchargement non vérifié n’est proposé.</p>}{error&&<p className="error" role="alert">{error}</p>}<button className="primary" disabled={busy||!files.length||(selected.id==='pdf.merge'&&files.length<2)||!destination||!engine?.installed} onClick={()=>void act(async()=>{await bridge.enqueue({operation:selected.id,inputs:files,destination,format,pages,width,quality,track});setSelected(null);setView('history');})}>Ajouter à la file　→</button><small className="source-note">Vos originaux restent intacts. Aucun fichier n’est écrasé.</small></section></div>}</div>;
 }

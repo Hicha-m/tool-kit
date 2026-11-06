@@ -28,11 +28,21 @@ fn execute(mut command:Command,cancel:&Arc<AtomicBool>,allow_warning:bool)->Resu
 }
 fn cmd(bin:&Path,args:&[&str])->Command {let mut c=Command::new(bin);c.args(args);c}
 pub fn run(data:&Path,db:&Path,r:&TaskRequest,cancel:&Arc<AtomicBool>)->Result<PathBuf,String> {
- validate(r)?;let engine=engine_for(&r.operation)?;let bin=engines::executable(data,engine,false)?;
+ let engine=engine_for(&r.operation)?;
+ let binaries=EngineBinaries{main:engines::executable(data,engine,false)?,probe:if engine=="ffmpeg"{Some(engines::executable(data,engine,true)?)}else{None}};
+ run_with_binaries(db,r,cancel,&binaries)
+}
+// Dependency injection stays private to Rust: IPC always resolves the qualified catalogue.
+struct EngineBinaries { main:PathBuf, probe:Option<PathBuf> }
+fn run_with_binaries(db:&Path,r:&TaskRequest,cancel:&Arc<AtomicBool>,binaries:&EngineBinaries)->Result<PathBuf,String> {
+ validate(r)?;
+ if cancel.load(Ordering::SeqCst){return Err("Annulé".into())}
+ let engine=engine_for(&r.operation)?;let bin=&binaries.main;
  let dest=Path::new(&r.destination).canonicalize().map_err(|e|e.to_string())?;
  let temp=tempfile::Builder::new().prefix(".toolkit-").suffix(&format!(".{}",r.format)).tempfile_in(&dest).map_err(|_|"Impossible d’écrire dans le dossier de destination.")?;
  let recorded=temp.path().to_string_lossy().into_owned();
  crate::store::connect(db)?.execute("INSERT INTO temporary_outputs(path) VALUES (?1)",[&recorded]).map_err(|e|e.to_string())?;
+ let _registration=TemporaryRegistration{db:db.to_path_buf(),path:recorded.clone()};
  let target=temp.path().to_str().ok_or("Chemin non pris en charge.")?;
  let input=&r.inputs[0];
  if engine=="qpdf" {
@@ -52,7 +62,7 @@ pub fn run(data:&Path,db:&Path,r:&TaskRequest,cancel:&Arc<AtomicBool>)->Result<P
    c.args(["--",target]);execute(c,cancel,true)?;
    execute(cmd(&bin,&["--check",target]),cancel,true)?;
  }else if engine=="ffmpeg" {
-   let probe=engines::executable(data,engine,true)?;
+   let probe=binaries.probe.as_ref().ok_or("Outil d’inspection absent.")?;
    execute(cmd(&probe,&["-v","error","-protocol_whitelist","file,pipe","-show_entries","format=duration","-of","default=noprint_wrappers=1",input]),cancel,false)?;
    let mut c=Command::new(&bin);c.args(["-nostdin","-v","error","-y","-protocol_whitelist","file,pipe","-i",input]);
    if r.operation=="video.convert" {c.args(["-map","0:v:0","-map","0:a:0?","-c:v","libx264","-preset","medium","-crf",&r.quality.to_string(),"-pix_fmt","yuv420p","-vf","pad=ceil(iw/2)*2:ceil(ih/2)*2","-c:a","aac","-b:a","192k","-movflags","+faststart"]);}
@@ -69,6 +79,7 @@ pub fn run(data:&Path,db:&Path,r:&TaskRequest,cancel:&Arc<AtomicBool>)->Result<P
    if r.operation=="image.resize"{c.args(["-resize",&format!("{}x>",r.width)]);}
    if r.format=="jpeg"{c.args(["-background","white","-alpha","remove","-alpha","off"]);}
    c.arg(target);execute(c,cancel,false)?;
+   let mut verify=cmd(&bin,&["identify","-regard-warnings",target]);verify.env("MAGICK_CONFIGURE_PATH",config.path());execute(verify,cancel,false)?;
  }
  if cancel.load(Ordering::SeqCst){return Err("Annulé".into())}
  if temp.as_file().metadata().map_err(|e|e.to_string())?.len()==0{return Err("Le résultat est vide.".into())}
@@ -80,3 +91,17 @@ pub fn run(data:&Path,db:&Path,r:&TaskRequest,cancel:&Arc<AtomicBool>)->Result<P
  match temp.persist_noclobber(&out){Ok(_)=>{let _=crate::store::connect(db)?.execute("DELETE FROM temporary_outputs WHERE path=?1",[&recorded]);return Ok(out)},Err(e) if e.error.kind()==std::io::ErrorKind::AlreadyExists=>{temp=e.file;},Err(e)=>return Err(format!("Impossible de conserver le résultat : {}",e.error))}
  }Err("Trop de fichiers portent déjà ce nom.".into())
 }
+
+struct TemporaryRegistration { db:PathBuf, path:String }
+impl Drop for TemporaryRegistration {
+ fn drop(&mut self){
+  // If removal fails, keep the record so startup recovery can retry.
+  let p=Path::new(&self.path);
+  if !p.exists() || fs::remove_file(p).is_ok(){
+   if let Ok(db)=crate::store::connect(&self.db){let _=db.execute("DELETE FROM temporary_outputs WHERE path=?1",[&self.path]);}
+  }
+ }
+}
+#[cfg(test)]
+#[path="tests/runner_regression.rs"]
+mod regression;

@@ -1,4 +1,4 @@
-name: Vérification du socle
+name: Fonctionnalités et régression
 on:
   push:
   pull_request:
@@ -11,19 +11,32 @@ jobs:
       matrix:
         os: [ubuntu-24.04, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
-      - name: Dépendances Ubuntu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Dépendances et moteurs de test Ubuntu
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf ffmpeg qpdf
+      - name: Moteurs de test Windows
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg qpdf imagemagick.app -y --no-progress
+      - name: Identifier les vrais moteurs (aucun mock)
+        run: python scripts/test-engines.py
       - run: npm install
       - run: npm test
       - run: npm run build
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Tests Rust et toutes les conversions réelles
+        run: python scripts/run-native-tests.py
       - name: Installateur Ubuntu de test
         if: runner.os == 'Linux'
         run: npm run tauri build -- --bundles deb
@@ -31,9 +44,13 @@ jobs:
         if: runner.os == 'Windows'
         run: npm run tauri build -- --bundles nsis
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: tool-kit-${{ matrix.os }}
+          include-hidden-files: true
           path: |
             src-tauri/target/release/bundle/
             package-lock.json
             src-tauri/Cargo.lock
+            .test-engines/versions.json
+            .test-engines/native-tests.log

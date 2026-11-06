@@ -1,7 +1,10 @@
 use crate::model::Task;
 use rusqlite::{params, Connection};
 use std::path::Path;
-pub fn connect(path:&Path)->Result<Connection,String> { Connection::open(path).map_err(|e|e.to_string()) }
+pub fn connect(path:&Path)->Result<Connection,String> {
+ let db=Connection::open(path).map_err(|e|e.to_string())?;
+ db.busy_timeout(std::time::Duration::from_secs(5)).map_err(|e|e.to_string())?;Ok(db)
+}
 pub fn init(path:&Path)->Result<(),String> {
  let db=connect(path)?;
  db.execute_batch("CREATE TABLE IF NOT EXISTS temporary_outputs(path TEXT PRIMARY KEY); CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, operation TEXT NOT NULL, status TEXT NOT NULL, created INTEGER NOT NULL, output TEXT, error TEXT); UPDATE tasks SET status='interrupted', error='L’application a été arrêtée avant la fin.' WHERE status IN ('queued','running'); PRAGMA user_version=1;").map_err(|e|e.to_string())?;
