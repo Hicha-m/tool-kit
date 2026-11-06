@@ -64,6 +64,10 @@ fn execute(
         .stdin(Stdio::null())
         .stdout(Stdio::from(output.try_clone().map_err(|e| e.to_string())?))
         .stderr(Stdio::null());
+    #[cfg(test)]
+    let mut stderr = tempfile::tempfile().map_err(|e| e.to_string())?;
+    #[cfg(test)]
+    command.stderr(Stdio::from(stderr.try_clone().map_err(|e| e.to_string())?));
     let mut child = command
         .group_spawn()
         .map_err(|_| "Le moteur n’a pas pu démarrer.")?;
@@ -84,6 +88,16 @@ fn execute(
         }
     };
     if !status.success() && !(allow_warning && status.code() == Some(3)) {
+        #[cfg(test)]
+        {
+            let _ = stderr.seek(SeekFrom::Start(0));
+            let mut details = String::new();
+            let _ = stderr.take(8192).read_to_string(&mut details);
+            eprintln!(
+                "Native test command {:?}, status {}: {}",
+                command, status, details
+            );
+        }
         return Err("Le moteur a refusé le fichier ou n’a pas pu produire le résultat. Vérifiez son format et l’espace disponible.".into());
     }
     output.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
@@ -136,12 +150,15 @@ fn run_with_binaries(
     let dest = Path::new(&r.destination)
         .canonicalize()
         .map_err(|e| e.to_string())?;
+    // Close the handle before a native engine reopens the path. In particular,
+    // qpdf uses CRT sharing modes that conflict with an open tempfile on Windows.
     let temp = tempfile::Builder::new()
         .prefix(".toolkit-")
         .suffix(&format!(".{}", r.format))
         .tempfile_in(&dest)
-        .map_err(|_| "Impossible d’écrire dans le dossier de destination.")?;
-    let recorded = temp.path().to_string_lossy().into_owned();
+        .map_err(|_| "Impossible d’écrire dans le dossier de destination.")?
+        .into_temp_path();
+    let recorded = temp.to_string_lossy().into_owned();
     crate::store::connect(db)?
         .execute(
             "INSERT INTO temporary_outputs(path) VALUES (?1)",
@@ -152,7 +169,7 @@ fn run_with_binaries(
         db: db.to_path_buf(),
         path: recorded.clone(),
     };
-    let target = temp.path().to_str().ok_or("Chemin non pris en charge.")?;
+    let target = temp.to_str().ok_or("Chemin non pris en charge.")?;
     let input = &r.inputs[0];
     if engine == "qpdf" {
         for input in &r.inputs {
@@ -299,7 +316,7 @@ fn run_with_binaries(
     if cancel.load(Ordering::SeqCst) {
         return Err("Annulé".into());
     }
-    if temp.as_file().metadata().map_err(|e| e.to_string())?.len() == 0 {
+    if temp.metadata().map_err(|e| e.to_string())?.len() == 0 {
         return Err("Le résultat est vide.".into());
     }
     let base = if r.operation == "pdf.merge" {
@@ -326,7 +343,7 @@ fn run_with_binaries(
                 return Ok(out);
             }
             Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                temp = e.file;
+                temp = e.path;
             }
             Err(e) => return Err(format!("Impossible de conserver le résultat : {}", e.error)),
         }

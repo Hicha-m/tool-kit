@@ -25,6 +25,8 @@ jobs:
         with:
           python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
@@ -44,10 +46,10 @@ jobs:
         run: python scripts/run-native-tests.py
       - name: Installateur Ubuntu de test
         if: runner.os == 'Linux'
-        run: npm run tauri build -- --locked --bundles deb
+        run: npm run tauri build -- --bundles deb -- --locked
       - name: Installateur Windows de test
         if: runner.os == 'Windows'
-        run: npm run tauri build -- --locked --bundles nsis
+        run: npm run tauri build -- --bundles nsis -- --locked
       - uses: actions/upload-artifact@v4
         if: always()
         with:
