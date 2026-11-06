@@ -6,7 +6,7 @@ Une boîte à outils locale et modulaire, en français, pour Windows 11 x64 et U
 
 **Socle initial en développement, pas une V1 prête à distribuer.** Interface React, hôte Tauri 2, file séquentielle Rust, historique SQLite et adaptateurs qpdf / FFmpeg / ImageMagick sont présents. Les archives de moteurs ne sont pas encore qualifiées : le catalogue reste volontairement vide et les traitements sont donc désactivés. Il n’y a aucune conversion simulée.
 
-Le réseau de l’environnement de création est indisponible ; Rust et les dépendances GTK/WebKit sont absents. Les tests Node sont exécutables sans installation ; la compilation React/Tauri et les recettes natives doivent encore réussir en CI. Aucun installateur validé n’est fourni à ce stade.
+Les régressions sont maintenant exécutées avec les vrais moteurs : sorties PDF, audio, vidéo et images contrôlées, ainsi que file, historique et téléchargement. Le cœur Rust peut être testé sans GTK/WebKit. La CI construit aussi les installateurs de test Windows/Ubuntu ; cela ne remplace pas une recette sur une machine utilisateur propre.
 
 ## Développement
 
@@ -15,7 +15,7 @@ Installer Node.js 22 LTS, npm et Rust stable. Sous Ubuntu 24.04 :
 ```bash
 sudo apt-get update
 sudo apt-get install -y build-essential pkg-config libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-npm install
+npm ci
 npm test
 npm run tauri dev
 ```
@@ -25,12 +25,12 @@ Sous Windows : installer Visual Studio Build Tools (C++), Rust MSVC et WebView2,
 ```bash
 npm run dev        # aperçu de l’interface dans un navigateur, sans traitement natif
 npm run build      # vérification TypeScript et compilation de l’interface
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --locked --manifest-path src-tauri/Cargo.toml
 npm run tauri build -- --bundles deb  # Ubuntu
 npm run tauri build -- --bundles nsis # Windows
 ```
 
-Les lockfiles ne sont pas inventés : ils devront être générés et commités après une première résolution réseau réussie. La CI utilise provisoirement `npm install`.
+Les dépendances sont verrouillées par `package-lock.json` et `src-tauri/Cargo.lock`. La CI utilise `npm ci` et Cargo `--locked`.
 
 ## Fonctions prévues dans ce socle
 
@@ -42,7 +42,7 @@ Les lockfiles ne sont pas inventés : ils devront être générés et commités 
 
 Aucun compte, télémétrie ou transfert de document. Les téléchargements de moteurs ne démarrent que sur action explicite et depuis le catalogue embarqué. L’historique stocke les chemins de sortie, pas les contenus ni les demandes de traitement.
 
-Voir [l’architecture](docs/architecture.md), [la qualification des moteurs](docs/engines.md) et [la checklist de livraison](docs/release.md).
+Voir [la suite de régression et ses limites](docs/regression.md), [l’architecture](docs/architecture.md), [la qualification des moteurs](docs/engines.md) et [la checklist de livraison](docs/release.md).
 
 ## Licence
 

@@ -1,7 +1,11 @@
 name: Fonctionnalités et régression
 on:
   push:
+    branches: [main]
   pull_request:
+concurrency:
+  group: regression-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
@@ -32,17 +36,18 @@ jobs:
         run: choco install ffmpeg qpdf imagemagick.app -y --no-progress
       - name: Identifier les vrais moteurs (aucun mock)
         run: python scripts/test-engines.py
-      - run: npm install
+      - run: npm ci
       - run: npm test
       - run: npm run build
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - name: Tests Rust et toutes les conversions réelles
         run: python scripts/run-native-tests.py
       - name: Installateur Ubuntu de test
         if: runner.os == 'Linux'
-        run: npm run tauri build -- --bundles deb
+        run: npm run tauri build -- --locked --bundles deb
       - name: Installateur Windows de test
         if: runner.os == 'Windows'
-        run: npm run tauri build -- --bundles nsis
+        run: npm run tauri build -- --locked --bundles nsis
       - uses: actions/upload-artifact@v4
         if: always()
         with:
