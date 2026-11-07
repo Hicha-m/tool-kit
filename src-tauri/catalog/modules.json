@@ -1,0 +1,59 @@
+{
+  "contractVersion": 1,
+  "modules": [
+    {
+      "id": "pdf",
+      "version": "0.1.0",
+      "engine": "qpdf",
+      "platforms": [
+        "windows-x86_64",
+        "linux-x86_64"
+      ],
+      "operations": [
+        "pdf.merge",
+        "pdf.extract"
+      ],
+      "formats": [
+        "pdf"
+      ]
+    },
+    {
+      "id": "media",
+      "version": "0.1.0",
+      "engine": "ffmpeg",
+      "platforms": [
+        "windows-x86_64",
+        "linux-x86_64"
+      ],
+      "operations": [
+        "audio.convert",
+        "video.convert",
+        "video.audio"
+      ],
+      "formats": [
+        "mp3",
+        "wav",
+        "flac",
+        "mp4"
+      ]
+    },
+    {
+      "id": "images",
+      "version": "0.1.0",
+      "engine": "imagemagick",
+      "platforms": [
+        "windows-x86_64",
+        "linux-x86_64"
+      ],
+      "operations": [
+        "image.convert",
+        "image.resize"
+      ],
+      "formats": [
+        "jpeg",
+        "png",
+        "webp"
+      ]
+    }
+  ]
+}

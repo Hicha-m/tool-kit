@@ -1,0 +1,9 @@
+node_modules/
+dist/
+src-tauri/target/
+*.log
+.DS_Store
+.test-engines/
+__pycache__/
+*.pyc
+*.tsbuildinfo

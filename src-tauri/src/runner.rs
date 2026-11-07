@@ -1,0 +1,384 @@
+use crate::{
+    engines,
+    model::{engine_for, pages_valid, TaskRequest},
+};
+use command_group::CommandGroup;
+use std::{
+    fs,
+    io::{Read, Seek, SeekFrom},
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
+    time::Duration,
+};
+
+pub fn validate(r: &TaskRequest) -> Result<(), String> {
+    engine_for(&r.operation)?;
+    if r.inputs.is_empty() || r.inputs.len() > 200 {
+        return Err("Choisissez entre 1 et 200 fichiers.".into());
+    }
+    if r.operation == "pdf.merge" && r.inputs.len() < 2 {
+        return Err("Choisissez au moins deux PDF.".into());
+    }
+    if r.operation != "pdf.merge" && r.inputs.len() != 1 {
+        return Err("Une tâche attend exactement un fichier.".into());
+    }
+    for p in &r.inputs {
+        let p = Path::new(p);
+        if !p.is_absolute() || !p.is_file() {
+            return Err("Un fichier source est introuvable.".into());
+        }
+    }
+    if !Path::new(&r.destination).is_absolute() || !Path::new(&r.destination).is_dir() {
+        return Err("Choisissez un dossier de destination existant.".into());
+    }
+    let allowed = match r.operation.as_str() {
+        "pdf.merge" | "pdf.extract" => vec!["pdf"],
+        "video.convert" => vec!["mp4"],
+        "image.convert" | "image.resize" => vec!["jpeg", "png", "webp"],
+        _ => vec!["mp3", "wav", "flac"],
+    };
+    if !allowed.contains(&r.format.as_str()) {
+        return Err("Format de sortie non pris en charge.".into());
+    }
+    if r.operation == "image.resize" && !(1..=16384).contains(&r.width) {
+        return Err("La largeur doit être comprise entre 1 et 16384 pixels.".into());
+    }
+    if r.operation == "video.convert" && !(18..=30).contains(&r.quality) {
+        return Err("La qualité CRF doit être comprise entre 18 et 30.".into());
+    }
+    Ok(())
+}
+// Separate process group: cancellation also terminates engine descendants.
+fn execute(
+    mut command: Command,
+    cancel: &Arc<AtomicBool>,
+    allow_warning: bool,
+) -> Result<String, String> {
+    let mut output = tempfile::tempfile().map_err(|e| e.to_string())?;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(output.try_clone().map_err(|e| e.to_string())?))
+        .stderr(Stdio::null());
+    #[cfg(test)]
+    let mut stderr = tempfile::tempfile().map_err(|e| e.to_string())?;
+    #[cfg(test)]
+    command.stderr(Stdio::from(stderr.try_clone().map_err(|e| e.to_string())?));
+    let mut child = command
+        .group_spawn()
+        .map_err(|_| "Le moteur n’a pas pu démarrer.")?;
+    let status = loop {
+        if cancel.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Annulé".into());
+        }
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) => thread::sleep(Duration::from_millis(80)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Impossible de suivre le processus.".into());
+            }
+        }
+    };
+    if !status.success() && !(allow_warning && status.code() == Some(3)) {
+        #[cfg(test)]
+        {
+            let _ = stderr.seek(SeekFrom::Start(0));
+            let mut details = String::new();
+            let _ = stderr.take(8192).read_to_string(&mut details);
+            eprintln!(
+                "Native test command {:?}, status {}: {}",
+                command, status, details
+            );
+        }
+        return Err("Le moteur a refusé le fichier ou n’a pas pu produire le résultat. Vérifiez son format et l’espace disponible.".into());
+    }
+    output.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    let mut text = String::new();
+    output
+        .take(65536)
+        .read_to_string(&mut text)
+        .map_err(|e| e.to_string())?;
+    Ok(text)
+}
+fn cmd(bin: &Path, args: &[&str]) -> Command {
+    let mut c = Command::new(bin);
+    c.args(args);
+    c
+}
+pub fn run(
+    data: &Path,
+    db: &Path,
+    r: &TaskRequest,
+    cancel: &Arc<AtomicBool>,
+) -> Result<PathBuf, String> {
+    let engine = engine_for(&r.operation)?;
+    let binaries = EngineBinaries {
+        main: engines::executable(data, engine, false)?,
+        probe: if engine == "ffmpeg" {
+            Some(engines::executable(data, engine, true)?)
+        } else {
+            None
+        },
+    };
+    run_with_binaries(db, r, cancel, &binaries)
+}
+// Dependency injection stays private to Rust: IPC always resolves the qualified catalogue.
+struct EngineBinaries {
+    main: PathBuf,
+    probe: Option<PathBuf>,
+}
+fn run_with_binaries(
+    db: &Path,
+    r: &TaskRequest,
+    cancel: &Arc<AtomicBool>,
+    binaries: &EngineBinaries,
+) -> Result<PathBuf, String> {
+    validate(r)?;
+    if cancel.load(Ordering::SeqCst) {
+        return Err("Annulé".into());
+    }
+    let mut normalized = r.clone();
+    normalized.inputs = r
+        .inputs
+        .iter()
+        .map(|input| {
+            dunce::canonicalize(input)
+                .map_err(|_| "Un fichier source est introuvable.".to_string())?
+                .into_os_string()
+                .into_string()
+                .map_err(|_| "Chemin non pris en charge.".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let r = &normalized;
+    let engine = engine_for(&r.operation)?;
+    let bin = &binaries.main;
+    // std::fs::canonicalize introduces the Windows \\?\ namespace.
+    // qpdf interprets that as a UNC path; keep ordinary paths in DOS form.
+    let dest = dunce::canonicalize(&r.destination).map_err(|e| e.to_string())?;
+    // Close the handle before a native engine reopens the path. In particular,
+    // qpdf uses CRT sharing modes that conflict with an open tempfile on Windows.
+    let temp = tempfile::Builder::new()
+        .prefix(".toolkit-")
+        .suffix(&format!(".{}", r.format))
+        .tempfile_in(&dest)
+        .map_err(|_| "Impossible d’écrire dans le dossier de destination.")?
+        .into_temp_path();
+    let recorded = temp.to_string_lossy().into_owned();
+    crate::store::connect(db)?
+        .execute(
+            "INSERT INTO temporary_outputs(path) VALUES (?1)",
+            [&recorded],
+        )
+        .map_err(|e| e.to_string())?;
+    let _registration = TemporaryRegistration {
+        db: db.to_path_buf(),
+        path: recorded.clone(),
+    };
+    let target = temp.to_str().ok_or("Chemin non pris en charge.")?;
+    let input = &r.inputs[0];
+    if engine == "qpdf" {
+        for input in &r.inputs {
+            // --is-encrypted returns 0 for encrypted and 2 for unencrypted PDF.
+            let mut check = Command::new(&bin);
+            check.args(["--is-encrypted", input]);
+            let result = execute(check, cancel, false);
+            if result.is_ok() {
+                return Err("PDF protégé : déverrouillez-le avant de le traiter.".into());
+            }
+            if cancel.load(Ordering::SeqCst) {
+                return Err("Annulé".into());
+            }
+            execute(cmd(&bin, &["--check", input]), cancel, true)?;
+        }
+        let mut c = Command::new(&bin);
+        c.args(["--empty", "--pages"]);
+        if r.operation == "pdf.extract" {
+            let count = execute(cmd(&bin, &["--show-npages", input]), cancel, false)?
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| "Nombre de pages illisible.")?;
+            if !pages_valid(&r.pages, count) {
+                return Err("Sélection de pages invalide ou hors du document.".into());
+            }
+            c.args([input, &r.pages]);
+        } else {
+            for p in &r.inputs {
+                c.args([p, "1-z"]);
+            }
+        }
+        c.args(["--", target]);
+        execute(c, cancel, true)?;
+        execute(cmd(&bin, &["--check", target]), cancel, true)?;
+    } else if engine == "ffmpeg" {
+        let probe = binaries
+            .probe
+            .as_ref()
+            .ok_or("Outil d’inspection absent.")?;
+        execute(
+            cmd(
+                &probe,
+                &[
+                    "-v",
+                    "error",
+                    "-protocol_whitelist",
+                    "file,pipe",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1",
+                    input,
+                ],
+            ),
+            cancel,
+            false,
+        )?;
+        let mut c = Command::new(&bin);
+        c.args([
+            "-nostdin",
+            "-v",
+            "error",
+            "-y",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-i",
+            input,
+        ]);
+        if r.operation == "video.convert" {
+            c.args([
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0?",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                &r.quality.to_string(),
+                "-pix_fmt",
+                "yuv420p",
+                "-vf",
+                "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-movflags",
+                "+faststart",
+            ]);
+        } else {
+            c.args(["-map", &format!("0:a:{}", r.track), "-vn"]);
+            match r.format.as_str() {
+                "mp3" => {
+                    c.args(["-c:a", "libmp3lame", "-b:a", "192k"]);
+                }
+                "wav" => {
+                    c.args(["-c:a", "pcm_s16le"]);
+                }
+                _ => {
+                    c.args(["-c:a", "flac"]);
+                }
+            }
+        }
+        c.arg(target);
+        execute(c, cancel, false)?;
+        execute(
+            cmd(
+                &probe,
+                &["-v", "error", "-show_entries", "format=format_name", target],
+            ),
+            cancel,
+            false,
+        )?;
+    } else {
+        let config = tempfile::tempdir().map_err(|e| e.to_string())?;
+        fs::write(
+            config.path().join("policy.xml"),
+            include_str!("../policy.xml"),
+        )
+        .map_err(|e| e.to_string())?;
+        let mut identify = cmd(&bin, &["identify", "-format", "%n\n", input]);
+        identify.env("MAGICK_CONFIGURE_PATH", config.path());
+        let frames = execute(identify, cancel, false)?;
+        if frames.lines().any(|n| n.trim() != "1") {
+            return Err("Les images animées ne sont pas prises en charge en V1.".into());
+        }
+        let mut c = Command::new(&bin);
+        c.env("MAGICK_CONFIGURE_PATH", config.path())
+            .args([input, "-auto-orient"]);
+        if r.operation == "image.resize" {
+            c.args(["-resize", &format!("{}x>", r.width)]);
+        }
+        if r.format == "jpeg" {
+            c.args(["-background", "white", "-alpha", "remove", "-alpha", "off"]);
+        }
+        c.arg(target);
+        execute(c, cancel, false)?;
+        let mut verify = cmd(&bin, &["identify", "-regard-warnings", target]);
+        verify.env("MAGICK_CONFIGURE_PATH", config.path());
+        execute(verify, cancel, false)?;
+    }
+    if cancel.load(Ordering::SeqCst) {
+        return Err("Annulé".into());
+    }
+    if temp.metadata().map_err(|e| e.to_string())?.len() == 0 {
+        return Err("Le résultat est vide.".into());
+    }
+    let base = if r.operation == "pdf.merge" {
+        "fusion".to_string()
+    } else {
+        Path::new(input)
+            .file_stem()
+            .ok_or("Nom de fichier invalide.")?
+            .to_string_lossy()
+            .into_owned()
+    };
+    let mut temp = temp;
+    for suffix in 0..10000 {
+        let name = if suffix == 0 {
+            format!("{base}_toolkit.{}", r.format)
+        } else {
+            format!("{base}_toolkit_{suffix}.{}", r.format)
+        };
+        let out = dest.join(name);
+        match temp.persist_noclobber(&out) {
+            Ok(_) => {
+                let _ = crate::store::connect(db)?
+                    .execute("DELETE FROM temporary_outputs WHERE path=?1", [&recorded]);
+                return Ok(out);
+            }
+            Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                temp = e.path;
+            }
+            Err(e) => return Err(format!("Impossible de conserver le résultat : {}", e.error)),
+        }
+    }
+    Err("Trop de fichiers portent déjà ce nom.".into())
+}
+
+struct TemporaryRegistration {
+    db: PathBuf,
+    path: String,
+}
+impl Drop for TemporaryRegistration {
+    fn drop(&mut self) {
+        // If removal fails, keep the record so startup recovery can retry.
+        let p = Path::new(&self.path);
+        if !p.exists() || fs::remove_file(p).is_ok() {
+            if let Ok(db) = crate::store::connect(&self.db) {
+                let _ = db.execute("DELETE FROM temporary_outputs WHERE path=?1", [&self.path]);
+            }
+        }
+    }
+}
+#[cfg(test)]
+#[path = "tests/runner_regression.rs"]
+mod regression;
