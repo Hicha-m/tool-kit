@@ -666,3 +666,27 @@ fn regression_readonly_destination_preserves_source_and_creates_no_partial_outpu
     assert_eq!(fs::read_dir(dest).unwrap().count(), 0);
     lab.clean();
 }
+
+// Reproduces the extended namespace returned by Rust canonicalize on Windows.
+// Keep the accents and spaces: replacing paths with ASCII hid the original failure.
+#[cfg(windows)]
+#[test]
+#[ignore = "real native engines"]
+fn regression_pdf_accepts_extended_windows_input_and_destination_paths() {
+    let lab = Lab::new();
+    let src = pdf(&lab, "entrée accentuée.pdf", &["ONE", "TWO"]);
+    let mut req = lab.request("pdf.extract", &[&src], "pdf");
+    req.inputs = vec![src.canonicalize().unwrap().to_str().unwrap().into()];
+    req.destination = lab
+        .dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .into();
+    req.pages = "2".into();
+    let out = lab.run(&req).unwrap();
+    assert_eq!(pdf_labels(&out), ["TWO"]);
+    lab.clean();
+}

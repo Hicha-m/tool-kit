@@ -145,11 +145,24 @@ fn run_with_binaries(
     if cancel.load(Ordering::SeqCst) {
         return Err("Annulé".into());
     }
+    let mut normalized = r.clone();
+    normalized.inputs = r
+        .inputs
+        .iter()
+        .map(|input| {
+            dunce::canonicalize(input)
+                .map_err(|_| "Un fichier source est introuvable.".to_string())?
+                .into_os_string()
+                .into_string()
+                .map_err(|_| "Chemin non pris en charge.".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let r = &normalized;
     let engine = engine_for(&r.operation)?;
     let bin = &binaries.main;
-    let dest = Path::new(&r.destination)
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
+    // std::fs::canonicalize introduces the Windows \\?\ namespace.
+    // qpdf interprets that as a UNC path; keep ordinary paths in DOS form.
+    let dest = dunce::canonicalize(&r.destination).map_err(|e| e.to_string())?;
     // Close the handle before a native engine reopens the path. In particular,
     // qpdf uses CRT sharing modes that conflict with an open tempfile on Windows.
     let temp = tempfile::Builder::new()

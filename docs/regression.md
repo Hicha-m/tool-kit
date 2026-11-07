@@ -26,6 +26,15 @@ Chaque appel d’adaptateur compare les sources octet par octet avant/après. Le
 - ZIP valide, mauvaise empreinte, téléchargement tronqué/interrompu/trop grand, taille d’extraction excessive, traversée de chemin, lien symbolique et conservation de l’ancienne version.
 - Interface : recherche sans accents, favoris, mémoire locale corrompue/refusée, contrats envoyés par les sept outils, réordonnancement PDF, réglages, absence de moteur, erreurs, annulation et ouverture/effacement de l’historique.
 
+### Régressions corrigées
+
+- Une fusion avec un seul PDF reste désactivée dans l’interface.
+- Les réglages de largeur reviennent à leur valeur par défaut à la réouverture.
+- Le bouton de destination possède un nom accessible stable.
+- Un lot est enregistré entièrement ou pas du tout ; les erreurs SQLite ne laissent pas un lot partiel.
+- Les temporaires et leurs enregistrements sont nettoyés après erreur ou annulation.
+- Les handles temporaires sont fermés avant l’appel aux CLI ; les chemins Windows canoniques sont normalisés avec `dunce` pour éviter leur interprétation incorrecte par qpdf. Un test Windows transmet explicitement des chemins d’entrée et de destination au format étendu.
+
 ## Reproduire
 
 ```bash
